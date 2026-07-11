@@ -83,6 +83,8 @@ LiquidityZone  g_zones[];
 SweepState     g_sweep;
 datetime       g_lastEntryBar = 0;
 datetime       g_lastZoneBar  = 0;
+int            g_atrHandle    = INVALID_HANDLE;
+bool           g_isTester     = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -90,11 +92,19 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(100);
    ZeroMemory(g_sweep);
+   g_isTester  = (bool)MQLInfoInteger(MQL_TESTER);
+   g_atrHandle = iATR(_Symbol, InpEntryTF, InpTrailATRPeriod);
+   if(g_atrHandle == INVALID_HANDLE)
+      return INIT_FAILED;
    Print("LiquiditySweepEA initialized on ", _Symbol);
    return INIT_SUCCEEDED;
   }
 
-void OnDeinit(const int reason) { ObjectsDeleteAll(0, "LSZ_"); }
+void OnDeinit(const int reason)
+  {
+   if(g_atrHandle != INVALID_HANDLE) IndicatorRelease(g_atrHandle);
+   ObjectsDeleteAll(0, "LSZ_");
+  }
 
 //+------------------------------------------------------------------+
 void OnTick()
@@ -142,6 +152,7 @@ void BuildZones()
    ClusterIntoZones(highs, true);
    ClusterIntoZones(lows, false);
 
+
    //--- previous day / week high & low
    if(InpUseDailyLevels)
      {
@@ -163,7 +174,8 @@ void BuildZones()
         }
      }
 
-   DrawZones();
+   if(!g_isTester)   // chart objects are dead weight in the Strategy Tester
+      DrawZones();
   }
 
 bool IsSwingHigh(ENUM_TIMEFRAMES tf, int bar, int side)
@@ -422,17 +434,16 @@ void ManagePositions()
       // ATR trailing after breakeven
       if(beDone)
         {
-         int atrH = iATR(_Symbol, InpEntryTF, InpTrailATRPeriod);
          double atrBuf[];
-         if(CopyBuffer(atrH, 0, 1, 1, atrBuf) == 1)
+         if(CopyBuffer(g_atrHandle, 0, 1, 1, atrBuf) == 1)
            {
             double trail = atrBuf[0] * InpTrailATRMult;
             double newSL = buy ? cur - trail : cur + trail;
-            if((buy && newSL > sl) || (!buy && newSL < sl))
+            double minStep = 5 * _Point;
+            if((buy && newSL > sl + minStep) || (!buy && newSL < sl - minStep))
                trade.PositionModify(ticket, NormalizeDouble(newSL, _Digits),
                                     PositionGetDouble(POSITION_TP));
            }
-         IndicatorRelease(atrH);
         }
      }
   }
