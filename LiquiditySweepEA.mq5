@@ -33,8 +33,15 @@ input bool            InpUseDailyLevels  = true;        // Include prev day/week
 input bool            InpUseRoundNumbers = true;        // Include round numbers as zones
 input double          InpRoundStep       = 50.0;        // Round number step in price (e.g. 50 = 3300/3350)
 
+enum ENUM_ENTRY_MODE
+  {
+   ENTRY_CHOCH  = 0,   // Wait for LTF structure break (CHoCH)
+   ENTRY_RETEST = 1    // Limit order at the swept zone (retest)
+  };
+
 //--- Sweep detection (M15)
 input ENUM_TIMEFRAMES InpEntryTF         = PERIOD_M15;  // Entry timeframe
+input ENUM_ENTRY_MODE InpEntryMode       = ENTRY_CHOCH; // Entry trigger after the sweep
 input double          InpVolSpikeMult    = 1.5;         // Sweep volume must exceed avg volume x this
 input int             InpVolAvgPeriod    = 20;          // Bars for average tick volume
 input int             InpChochWindow     = 12;          // Max entry-TF bars to wait for CHoCH after sweep
@@ -273,7 +280,12 @@ void DetectSweep()
       // wick pierces above the zone top, close back below it
       if(g_zones[z].isHigh && h > g_zones[z].top && c < g_zones[z].top && volSpike)
         {
-         g_zones[z].swept     = true;
+         g_zones[z].swept = true;
+         if(InpEntryMode == ENTRY_RETEST)
+           {
+            PlaceRetestOrder(false, g_zones[z].top, h);
+            return;
+           }
          g_sweep.active       = true;
          g_sweep.bullish      = false;
          g_sweep.sweepExtreme = h;
@@ -288,7 +300,12 @@ void DetectSweep()
       // SWEEP OF LOWS (sell-side liquidity taken -> look for LONG)
       if(!g_zones[z].isHigh && l < g_zones[z].bottom && c > g_zones[z].bottom && volSpike)
         {
-         g_zones[z].swept     = true;
+         g_zones[z].swept = true;
+         if(InpEntryMode == ENTRY_RETEST)
+           {
+            PlaceRetestOrder(true, g_zones[z].bottom, l);
+            return;
+           }
          g_sweep.active       = true;
          g_sweep.bullish      = true;
          g_sweep.sweepExtreme = l;
@@ -364,6 +381,49 @@ void CheckChochAndEnter()
          "  TP=", DoubleToString(tp, _Digits),
          "  R:R=", DoubleToString(reward / risk, 2));
    ZeroMemory(g_sweep);
+  }
+
+// RETEST mode: limit order at the swept zone edge, expiring after the wait window
+void PlaceRetestOrder(bool buy, double zoneEdge, double sweepExtreme)
+  {
+   if(CountMyPositions() + CountMyPendings() >= InpMaxPositions)
+      return;
+
+   double entry = NormalizeDouble(zoneEdge, _Digits);
+   double sl = buy ? sweepExtreme - InpSLBufferPts * _Point
+                   : sweepExtreme + InpSLBufferPts * _Point;
+   double tp = NextZoneTarget(buy, entry);
+   double risk   = MathAbs(entry - sl);
+   double reward = (tp > 0) ? MathAbs(tp - entry) : 0;
+   if(risk <= 0 || tp <= 0 || reward / risk < InpMinRR)
+     {
+      Print("Retest order skipped: R:R ", DoubleToString(reward / MathMax(risk, _Point), 2),
+            " below minimum ", InpMinRR);
+      return;
+     }
+   double lots = LotsForRisk(risk);
+   if(lots <= 0) return;
+
+   datetime expiry = TimeCurrent() + InpChochWindow * PeriodSeconds(InpEntryTF);
+   bool ok = buy ? trade.BuyLimit(lots, entry, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiry, "LSweep retest long")
+                 : trade.SellLimit(lots, entry, _Symbol, sl, tp, ORDER_TIME_SPECIFIED, expiry, "LSweep retest short");
+   Print(ok ? "RETEST ORDER " : "RETEST ORDER FAILED ", buy ? "BUY LIMIT " : "SELL LIMIT ",
+         DoubleToString(lots, 2), " @ ", DoubleToString(entry, _Digits),
+         "  SL=", DoubleToString(sl, _Digits), "  TP=", DoubleToString(tp, _Digits),
+         "  R:R=", DoubleToString(reward / risk, 2));
+  }
+
+int CountMyPendings()
+  {
+   int cnt = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong t = OrderGetTicket(i);
+      if(t != 0 && OrderGetInteger(ORDER_MAGIC) == InpMagic &&
+         OrderGetString(ORDER_SYMBOL) == _Symbol)
+         cnt++;
+     }
+   return cnt;
   }
 
 // most recent entry-TF swing against the sweep direction (the CHoCH trigger)
